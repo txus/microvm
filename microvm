@@ -1,0 +1,150 @@
+#!/usr/bin/env ruby -w
+
+module Micro; VERSION = '0.0.1'
+  class CodeLoader
+    OPCODES = [
+      :push_literal,
+      :push_local,
+      :pop,
+
+      :add,
+      :sub,
+      :mul,
+      :div,
+
+      :call,
+
+      :ret
+    ]
+
+    def self.load_file(filename)
+      functions = []
+
+      file = File.open(filename)
+      while !file.eof? && line = file.readline
+        if line =~/^_/
+          functions.push VM::Function.new(line.chomp[1..-2].to_sym)
+          functions.last.code = []
+          functions.last.literals = []
+        elsif line =~ /^:/
+          functions.last.literals = line[1..-1].split(',').map do |literal|
+            if literal =~ /\"/
+              literal.chomp[1..-2]
+            else
+              literal.to_i
+            end
+          end
+        else
+          opcode, operand = line.split('.').map(&:to_i)
+          functions.last.code.push VM::Instruction.new(OPCODES[opcode], operand)
+        end
+      end
+
+      return functions
+    end
+  end
+
+  class VM
+    Instruction = Struct.new(:opcode, :operand)
+    Function    = Struct.new(:name, :code, :literals)
+
+    MAX_STACK_DEPTH = 128
+
+    def load(filename)
+      @functions = CodeLoader.load_file(filename)
+      self
+    end
+
+    def run
+      main   = find_function(:main)
+      @frame = CallFrame.new(self, main)
+      p @frame.execute
+    end
+
+    def find_function(name)
+      @functions.detect { |m| m.name == name.to_sym }
+    end
+
+    class CallFrame
+      def initialize(state, function, locals = [], depth=0)
+        @state    = state
+
+        @code     = function.code
+        @literals = function.literals
+        @locals   = locals
+        @depth    = depth
+
+        @stack    = []
+      end
+
+      def execute
+        @code.each do |instruction|
+          case instruction.opcode
+            when :push_literal
+              @stack.push @literals[instruction.operand]
+            when :push_local
+              @stack.push @locals[instruction.operand]
+            when :pop
+              @stack.pop
+            when :add
+              op1 = @stack.pop
+              op2 = @stack.pop
+              check_type(Fixnum, op1, op2)
+              @stack.push op1 + op2
+            when :sub
+              op1 = @stack.pop
+              op2 = @stack.pop
+              check_type(Fixnum, op1, op2)
+              @stack.push op1 - op2
+            when :mul
+              op1 = @stack.pop
+              op2 = @stack.pop
+              check_type(Fixnum, op1, op2)
+              @stack.push op1 * op2
+            when :div
+              op1 = @stack.pop
+              op2 = @stack.pop
+              check_type(Fixnum, op1, op2)
+              raise ZeroDivisionError if op2 == 0
+              @stack.push op1 / op2
+            when :call
+              argsnum = instruction.operand
+              function_name = @stack.pop
+              function = @state.find_function(function_name)
+
+              locals = []
+              argsnum.times { locals.push @stack.pop }
+
+              if !function
+                raise NameError, "Can't find function `#{function_name}'"
+              end
+
+              if @depth > MAX_STACK_DEPTH
+                raise "Call stack level too deep"
+              end
+
+              call_frame = CallFrame.new(@state, function, locals, @depth + 1)
+              @stack.push call_frame.execute
+            when :ret
+              return @stack.pop
+          end
+        end
+        raise "Broken bytecode: lack of RET opcode."
+      end
+
+      def check_type(type, *operands)
+        operands.each do |operand|
+          raise TypeError, "#{operand.inspect} is not a #{type}" unless operand.is_a?(type)
+        end
+      end
+    end
+  end
+end
+
+unless ARGV.first
+  puts "MicroVM #{Micro::VERSION}\n============="
+  puts "\tUsage: microvm my_file.mc"
+  exit(1)
+end
+
+Micro::VM.new.load(ARGV.first).run
